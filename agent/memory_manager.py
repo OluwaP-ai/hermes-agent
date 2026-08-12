@@ -669,6 +669,28 @@ class MemoryManager:
             return
         user_content = clean_user_content
 
+        # External memory writes are an information-release boundary. A
+        # registered policy must explicitly allow the completed turn before
+        # any provider worker receives its content. This happens before the
+        # background job is submitted, so a later cancellation cannot race a
+        # queued write.
+        try:
+            from hermes_cli.plugins import resolve_pre_memory_write
+
+            allowed, reason = resolve_pre_memory_write(
+                action="sync_turn",
+                target="external_memory_providers",
+                content=f"{user_content}\n{assistant_content}",
+                session_id=session_id,
+                messages=messages,
+            )
+        except Exception as exc:
+            logger.warning("Memory policy evaluation failed; blocking provider sync: %s", exc)
+            return
+        if not allowed:
+            logger.info("External memory provider sync blocked by policy: %s", reason)
+            return
+
         def _run() -> None:
             for provider in providers:
                 try:
@@ -1027,6 +1049,22 @@ class MemoryManager:
 
         Skips the builtin provider itself (it's the source of the write).
         """
+        try:
+            from hermes_cli.plugins import resolve_pre_memory_write
+
+            allowed, reason = resolve_pre_memory_write(
+                action=action,
+                target=target,
+                content=content,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.warning("Memory policy evaluation failed; blocking provider mirror: %s", exc)
+            return
+        if not allowed:
+            logger.info("External memory provider mirror blocked by policy: %s", reason)
+            return
+
         for provider in self._providers:
             if provider.name == "builtin":
                 continue

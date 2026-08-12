@@ -136,6 +136,10 @@ _install_plugin_debug_handler()
 VALID_HOOKS: Set[str] = {
     "pre_tool_call",
     "post_tool_call",
+    # Fail-closed policy seam before conversation content is handed to an
+    # external memory provider. Enforcement semantics are implemented by
+    # resolve_pre_memory_write(); observers must use a different hook.
+    "pre_memory_write",
     "transform_terminal_output",
     "transform_tool_result",
     # Transform LLM output before it's returned to the user.
@@ -2135,6 +2139,14 @@ class PluginManager:
                     getattr(cb, "__name__", repr(cb)),
                     exc,
                 )
+                # Ordinary observer hooks are fail-open so telemetry cannot
+                # break the agent. Policy hooks are different: losing the
+                # decision must not silently release content to memory.
+                if hook_name == "pre_memory_write":
+                    results.append({
+                        "action": "block",
+                        "reason": "memory policy callback failed",
+                    })
         return results
 
     def has_hook(self, hook_name: str) -> bool:
@@ -2452,6 +2464,49 @@ def has_middleware(kind: str) -> bool:
 def has_hook(hook_name: str) -> bool:
     """Return True when a loaded plugin handles a hook."""
     return get_plugin_manager().has_hook(hook_name)
+
+
+def resolve_pre_memory_write(
+    *,
+    action: str,
+    target: str,
+    content: str,
+    session_id: str = "",
+    messages: Optional[List[Dict[str, Any]]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> tuple[bool, str]:
+    """Return a fail-closed policy decision for an external memory write.
+
+    No registered policy preserves upstream behavior. Once any policy is
+    registered, at least one explicit ``{"action": "allow"}`` is required
+    and any ``{"action": "block"}`` wins. Callback failures are converted to
+    block directives by :meth:`PluginManager.invoke_hook`.
+    """
+    if not has_hook("pre_memory_write"):
+        return True, ""
+
+    results = invoke_hook(
+        "pre_memory_write",
+        action=action,
+        target=target,
+        content=content,
+        session_id=session_id,
+        messages=list(messages or []),
+        metadata=dict(metadata or {}),
+    )
+    allowed = False
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        directive = result.get("action")
+        if directive == "block":
+            reason = result.get("reason")
+            return False, reason if isinstance(reason, str) else "memory policy blocked write"
+        if directive == "allow":
+            allowed = True
+    if not allowed:
+        return False, "memory policy returned no explicit allow decision"
+    return True, ""
 
 
 _thread_tool_whitelist = threading.local()
