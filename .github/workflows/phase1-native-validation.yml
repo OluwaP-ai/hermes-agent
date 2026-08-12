@@ -71,6 +71,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "72839578f046068c74d6128c15b23122f21fa8b3b705d3ed27043e96e3a94bfa  .github/phase1/0001-generic-fail-closed-memory-policy-hook.patch" | sha256sum -c -
+          git fetch --no-tags --depth=1 origin refs/heads/phase1-base:refs/remotes/origin/phase1-base
+          test "$(git rev-parse refs/remotes/origin/phase1-base)" = "f51aa6a9b5ce514e15f8e337777f522fd5cc6fa2"
           git worktree add --detach /tmp/hermes-phase1-clean f51aa6a9b5ce514e15f8e337777f522fd5cc6fa2
           git -C /tmp/hermes-phase1-clean apply --check "$GITHUB_WORKSPACE/.github/phase1/0001-generic-fail-closed-memory-policy-hook.patch"
 
