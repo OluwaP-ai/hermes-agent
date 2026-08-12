@@ -1,0 +1,87 @@
+name: Phase 1 native validation
+
+on:
+  push:
+    branches:
+      - phase1-validation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase1-native-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Exact Hermes gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      OPENROUTER_API_KEY: ""
+      OPENAI_API_KEY: ""
+      NOUS_API_KEY: ""
+      HERMES_TEST_WORKERS: "8"
+    steps:
+      - name: Checkout validation branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+
+      - name: Set up Node 26
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26
+
+      - name: Install ripgrep 15.1.0
+        run: |
+          set -euo pipefail
+          RG_VERSION=15.1.0
+          RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
+          RG_TARBALL=ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz
+          curl -sSfL --retry 3 --retry-delay 5 -o "$RG_TARBALL" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_TARBALL}"
+          echo "${RG_SHA256}  ${RG_TARBALL}" | sha256sum -c -
+          tar -xzf "$RG_TARBALL"
+          sudo mv "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" /usr/local/bin/rg
+          rm -rf "$RG_TARBALL" "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
+          rg --version
+
+      - name: Install uv 0.9.28
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install Python 3.11
+        uses: ./.github/actions/retry
+        with:
+          command: uv python install 3.11
+
+      - name: Install locked dependencies
+        uses: ./.github/actions/retry
+        with:
+          command: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
+
+      - name: Verify locked patch digest and clean applicability
+        run: |
+          set -euo pipefail
+          echo "72839578f046068c74d6128c15b23122f21fa8b3b705d3ed27043e96e3a94bfa  .github/phase1/0001-generic-fail-closed-memory-policy-hook.patch" | sha256sum -c -
+          git fetch --no-tags --depth=1 origin refs/heads/phase1-base:refs/remotes/origin/phase1-base
+          test "$(git rev-parse refs/remotes/origin/phase1-base)" = "f51aa6a9b5ce514e15f8e337777f522fd5cc6fa2"
+          git worktree add --detach /tmp/hermes-phase1-clean f51aa6a9b5ce514e15f8e337777f522fd5cc6fa2
+          git -C /tmp/hermes-phase1-clean apply --check "$GITHUB_WORKSPACE/.github/phase1/0001-generic-fail-closed-memory-policy-hook.patch"
+
+      - name: Run MEMORY-003
+        run: |
+          source .venv/bin/activate
+          scripts/run_tests.sh tests/webbook/test_memory_policy_hook.py
+
+      - name: Run complete upstream Hermes suite
+        run: |
+          source .venv/bin/activate
+          scripts/run_tests.sh
